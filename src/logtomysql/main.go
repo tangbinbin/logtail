@@ -20,6 +20,7 @@ var (
 	addr     = flag.String("h", "127.0.0.1:3306", "mysql addr")
 	user     = flag.String("u", "test", "mysql user")
 	password = flag.String("p", "test", "mysql password")
+	thread   = flag.Int("t", 1, "thread write to mysql")
 	db       *sql.DB
 )
 
@@ -48,7 +49,7 @@ func initDb() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	db.SetMaxOpenConns(2)
+	db.SetMaxOpenConns(20)
 }
 
 func main() {
@@ -77,12 +78,14 @@ func (t *Ttail) run() {
 	host, _ := os.Hostname()
 	ch := make(chan Logger, 1000)
 
-	go func() {
-		for {
-			l := <-ch
-			exec(l)
-		}
-	}()
+	for i := 0; i < *thread; i++ {
+		go func() {
+			for {
+				l := <-ch
+				exec(l)
+			}
+		}()
+	}
 
 	for {
 		f, err := os.Open(t.filename)
