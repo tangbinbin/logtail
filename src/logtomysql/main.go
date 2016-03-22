@@ -42,8 +42,10 @@ func init() {
 }
 
 func initDb() {
-	connStr := fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8&timeout=100ms",
-		*user, *password, *addr, "log")
+	connStr := fmt.Sprintf(
+		"%s:%s@tcp(%s)/%s?charset=utf8&timeout=100ms",
+		*user, *password, *addr, "log",
+	)
 	var err error
 	db, err = sql.Open("mysql", connStr)
 	if err != nil {
