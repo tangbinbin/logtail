@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"go.intra.xiaojukeji.com/golang/sarama"
+	"github.com/Shopify/sarama"
 	"io"
 	"log"
 	"os"
