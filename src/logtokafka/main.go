@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"github.com/Shopify/sarama"
+	"go.intra.xiaojukeji.com/golang/sarama"
 	"io"
 	"log"
 	"os"
@@ -18,16 +18,16 @@ import (
 
 var (
 	filename          = flag.String("f", "", "input file name")
-	mode              = flag.String("m", "polling", "polling or notify")
-	brokers           = flag.String("b", "10.121.91.6:9092,10.121.92.4:9092", "kakfa brokers")
+	brokers           = flag.String("b", "127.0.0.1:9092,127.0.0.1:9093", "kafka brokers")
 	topic             = flag.String("t", "test", "kafka topic")
 	prefix            = flag.String("prefix", "", "only line begins with prefix")
+	template          = flag.String("m", "LINE", "HOSTNAME FILENAME LINE")
 	containStrings    = flag.String("contains", "", "Split by ','")
 	containRelation   = flag.String("containRelation", "or", "one of (and,or)")
 	notContainStrings = flag.String("notcontains", "", "Split by ',' and")
 	flush             = flag.Int("n", 200, "number message flush to kafka")
+	chsize            = flag.Int("cs", 1000, "size of buffer channel")
 	buffer            = flag.Int("s", 128, "bufio size kbyte")
-	addmetadata       = flag.Bool("addmetadata", false, "add hostname and filename")
 	empty             = []byte("")
 )
 
@@ -39,8 +39,13 @@ type Ttail struct {
 	size            int64
 	where           int
 	containRelation string
-	filenameB       []byte
-	hostname        []byte
+	mode            string
+	template        string
+	temCache        string
+	addHost         bool
+	addFilename     bool
+	hostname        string
+	ch              chan ([]byte)
 	hasprefix       []byte
 	contains        [][]byte
 	notcontains     [][]byte
@@ -51,7 +56,11 @@ func init() {
 }
 
 func main() {
-	runtime.GOMAXPROCS(runtime.NumCPU())
+	if runtime.NumCPU() > 2 {
+		runtime.GOMAXPROCS(2)
+	} else {
+		runtime.GOMAXPROCS(runtime.NumCPU())
+	}
 	log.Println("start")
 
 	if *filename != "" {
@@ -75,21 +84,24 @@ func newTtail() *Ttail {
 	config.Producer.Flush.Messages = *flush
 	config.Producer.RequiredAcks = 0
 	producer, _ := sarama.NewAsyncProducer(strings.Split(*brokers, ","), config)
-
 	t := &Ttail{
-		topic:      *topic,
-		bufferSize: *buffer,
-		producer:   producer,
-		where:      os.SEEK_END,
+		topic:       *topic,
+		bufferSize:  *buffer,
+		producer:    producer,
+		where:       os.SEEK_END,
+		mode:        getMode(*filename),
+		template:    *template,
+		addHost:     strings.Contains(*template, "HOSTNAME"),
+		addFilename: strings.Contains(*template, "FILENAME"),
 	}
-	if *mode == "polling" {
+
+	if t.mode == "polling" {
 		t.filename = *filename
 	} else {
 		t.filename = parseFilename(*filename)
 	}
-	t.filenameB = []byte(t.filename)
 	host, _ := os.Hostname()
-	t.hostname = []byte(host)
+	t.hostname = host
 	t.hasprefix = []byte(*prefix)
 
 	for _, i := range strings.Split(*containStrings, ",") {
@@ -101,6 +113,26 @@ func newTtail() *Ttail {
 	}
 
 	t.containRelation = *containRelation
+	t.ch = make(chan []byte, 1000)
+
+	log.Println("tep", t.template)
+	t.temCache = t.template
+	if t.addHost {
+		t.temCache = fmt.Sprintf(
+			strings.Replace(t.temCache, "HOSTNAME", "%s", -1),
+			t.hostname,
+		)
+	}
+
+	if t.addFilename {
+		t.temCache = strings.Replace(t.temCache, "FILENAME", "%s", -1)
+		log.Println(t.temCache)
+	} else {
+		log.Println(t.temCache)
+		t.temCache = strings.Replace(t.temCache, "LINE", "%s", -1)
+		log.Println(t.temCache)
+	}
+
 	return t
 }
 
@@ -111,7 +143,18 @@ func (t *Ttail) run() {
 		}
 	}()
 
-	if *mode == "polling" {
+	go func() {
+		for {
+			line := <-t.ch
+			msg := &sarama.ProducerMessage{
+				Topic: t.topic,
+				Value: sarama.ByteEncoder(t.parseLine(line)),
+			}
+			t.producer.Input() <- msg
+		}
+	}()
+
+	if t.mode == "polling" {
 		t.runOnPolling()
 	}
 	t.runOnNotify()
@@ -154,29 +197,17 @@ func (t *Ttail) runOnPolling() {
 			}
 
 			if err != nil {
+				log.Println(err)
 				f.Close()
 				time.Sleep(5 * time.Second)
 				break
 			}
 
-			if !t.parseLine(line) {
+			if !t.rightful(line) {
 				continue
 			}
 
-			msg := &sarama.ProducerMessage{Topic: t.topic}
-			if *addmetadata {
-				msg.Value = sarama.ByteEncoder(
-					bytes.Join([][]byte{
-						t.hostname,
-						t.filenameB,
-						line[:(lsize - 1)]}, []byte{32},
-					),
-				)
-			} else {
-				msg.Value = sarama.ByteEncoder(line[:(lsize - 1)])
-			}
-
-			t.producer.Input() <- msg
+			t.ch <- line
 			t.size = t.size + int64(lsize)
 		}
 	}
@@ -215,30 +246,31 @@ func (t *Ttail) runOnNotify() {
 			}
 
 			if err != nil {
+				log.Println(err)
 				f.Close()
 				time.Sleep(5 * time.Second)
 				break
 			}
 
-			if !t.parseLine(line) {
+			if !t.rightful(line) {
 				continue
 			}
 
-			msg := &sarama.ProducerMessage{Topic: t.topic}
-			if *addmetadata {
-				msg.Value = sarama.ByteEncoder(
-					bytes.Join([][]byte{
-						t.hostname,
-						t.filenameB,
-						line[:(len(line) - 1)]}, []byte{32},
-					),
-				)
-			} else {
-				msg.Value = sarama.ByteEncoder(line[:(len(line) - 1)])
-			}
-
-			t.producer.Input() <- msg
+			t.ch <- line
 		}
+	}
+}
+
+func (t *Ttail) parseLine(line []byte) []byte {
+	if t.addFilename {
+		return []byte(fmt.Sprintf(
+			strings.Replace(
+				fmt.Sprintf(t.temCache, t.filename),
+				"LINE", "%s", -1),
+			line[:len(line)-1],
+		))
+	} else {
+		return []byte(fmt.Sprintf(t.temCache, line[:len(line)-1]))
 	}
 }
 
@@ -287,7 +319,7 @@ func parseInt(i int) string {
 	return fmt.Sprintf("%d", i)
 }
 
-func (t *Ttail) parseLine(line []byte) bool {
+func (t *Ttail) rightful(line []byte) bool {
 	if hasPrefix(line, t.hasprefix) &&
 		contains(line, t.containRelation, t.contains) &&
 		notcontains(line, t.notcontains) {
@@ -333,4 +365,14 @@ func notcontains(line []byte, c [][]byte) bool {
 		}
 	}
 	return true
+}
+
+func getMode(f string) string {
+	if strings.Contains(f, "YYYY") ||
+		strings.Contains(f, "MM") ||
+		strings.Contains(f, "DD") ||
+		strings.Contains(f, "HH") {
+		return "notify"
+	}
+	return "polling"
 }

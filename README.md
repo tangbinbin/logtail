@@ -6,12 +6,8 @@ lottail
 - go1.5
 
 ## logtail
-    ./bin/logtokafka -h
-    Usage of ./bin/logtokafka:
-        -addmetadata
-            add hostname and filename (default true)
-            如果true 则kafka格式为 $Host $filename $line
-            如果false 则为 $line
+    ./bin/ttail -h
+    Usage of ./bin/ttail:
         -b string
             kakfa brokers (default "10.121.91.6:9092,10.121.92.4:9092")
         -containRelation string
@@ -27,10 +23,8 @@ lottail
             a.log.YYYYMMDDHH
             a.YYYY-MM-DD.log
         -m string
-            polling or notify (default "polling")
-            打开日志文件的模式
-            如果是精确的日志名选择 polling 模式
-            如果含日期通配则选择 notify 模式
+            HOSTNAME FILENAME LINE (default "LINE")
+            消息格式模板 HOSTNAME FILENAME LINE 可以任意用链接词组合
         -n int
             number message flush to kafka (default 200)
             每次往kafka写的msg条数
@@ -44,3 +38,6 @@ lottail
             bufio size kbyte (default 128)
         -t string
             kafka topic (default "test")
+        -cs int
+            size of buffer channel (default 1000)
+            可理解为缓存队列长度
